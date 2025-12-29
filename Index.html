@@ -1,0 +1,219 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width,initial-scale=1"/>
+    <title>Connect Solana Wallet</title>
+    <style>
+      body{font-family:Arial,Helvetica,sans-serif;padding:20px;background:#fafafa;color:#111}
+      .box{max-width:820px;margin:12px auto;padding:18px;border-radius:8px;background:#fff;box-shadow:0 2px 10px rgba(0,0,0,0.06)}
+      h1{margin:0 0 8px;font-size:20px}
+      p.small{color:#666;font-size:13px}
+      .row{display:flex;gap:12px;flex-wrap:wrap;margin-top:12px}
+      button{padding:10px 14px;font-size:15px;border-radius:8px;border:1px solid #ddd;background:#fff;cursor:pointer}
+      input, textarea {width:100%;padding:10px;border-radius:6px;border:1px solid #ddd;margin-top:8px}
+      label{font-weight:600;margin-top:10px;display:block}
+      pre{background:#f6f6f6;padding:10px;border-radius:6px;overflow:auto}
+      .ok{color:green}
+      .err{color:#a00}
+    </style>
+  </head>
+  <body>
+    <div class="box">
+      <h1>Connect your Solana wallet</h1>
+      <p class="small">This page will <strong>only send your public key and a signature</strong> to the bot backend — <em>never</em> your private key or mnemonic. You may either connect with Phantom (recommended) or import locally (mnemonic/private key) — import is done entirely inside your browser.</p>
+
+      <div>
+        <strong>Session:</strong> <span id="session">—</span>
+      </div>
+      <div>
+        <strong>Challenge (server):</strong>
+        <pre id="challenge">—</pre>
+      </div>
+
+      <div class="row">
+        <button id="phantomConnectBtn">Connect Phantom</button>
+        <button id="signBtn" disabled>Sign Challenge & Save</button>
+        <button id="mobileBtn">Open in Phantom (mobile)</button>
+      </div>
+
+      <hr style="margin:16px 0"/>
+
+      <h2 style="font-size:16px;margin-bottom:6px">Import wallet locally (optional)</h2>
+      <p class="small">Paste your mnemonic or private key into the box BELOW. <strong>The mnemonic/private key never leaves your browser.</strong> The page will derive your public address and then sign the server challenge using your private key locally. Only the public key and the signature are sent to the server.</p>
+
+      <label for="importKey">Mnemonic or Base58 private key</label>
+      <textarea id="importKey" rows="3" placeholder="paste mnemonic or base58 private key here"></textarea>
+      <div class="row">
+        <button id="importDeriveBtn">Derive Public Key Locally</button>
+        <button id="importSignBtn" disabled>Sign Challenge & Save (local)</button>
+      </div>
+
+      <div style="margin-top:12px">
+        <strong>Derived public key:</strong> <div id="derived" style="word-break:break-all"></div>
+      </div>
+
+      <div id="result" style="margin-top:14px"></div>
+      <p class="small" style="margin-top:12px">Return to Telegram after a successful save: the bot username will be shown as a return link.</p>
+    </div>
+
+    <!-- CDN libs -->
+    <script src="https://unpkg.com/@solana/web3.js@1.66.0/lib/index.iife.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/bs58/4.0.1/bs58.min.js"></script>
+    <!-- bip39 + ed25519 libs to derive keys in-browser -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/bip39/3.0.4/browser/bip39.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@stablelib/ed25519@0.9.3/+esm"></script>
+    <script>
+    (function(){
+      const urlParams = new URLSearchParams(window.location.search);
+      const session = urlParams.get('session') || '';
+      document.getElementById('session').innerText = session || 'missing';
+      const resultEl = document.getElementById('result');
+      const challengeEl = document.getElementById('challenge');
+
+      async function fetchChallenge(){
+        if(!session){ resultEl.innerHTML = '<span class="err">Session missing</span>'; return; }
+        const res = await fetch('/api/session_info/' + session);
+        if(!res.ok){ resultEl.innerHTML = '<span class="err">Invalid session</span>'; return; }
+        const j = await res.json();
+        challengeEl.innerText = j.challenge;
+      }
+      fetchChallenge();
+
+      // Phantom flow
+      let provider = window.solana && window.solana.isPhantom ? window.solana : null;
+      document.getElementById('phantomConnectBtn').addEventListener('click', async ()=>{
+        provider = window.solana && window.solana.isPhantom ? window.solana : null;
+        if(!provider){ alert('Phantom not found. Use a wallet-enabled browser or mobile deep link.'); return; }
+        try{
+          const resp = await provider.connect();
+          const pub = resp.publicKey.toString();
+          document.getElementById('derived').innerText = pub;
+          resultEl.innerHTML = '<span class="ok">Connected: ' + pub + '</span>';
+          document.getElementById('signBtn').disabled = false;
+        }catch(e){
+          resultEl.innerHTML = '<span class="err">Phantom connect failed</span>';
+          console.error(e);
+        }
+      });
+
+      document.getElementById('signBtn').addEventListener('click', async ()=>{
+        if(!provider) return alert('Connect Phantom first');
+        try{
+          const challenge = challengeEl.innerText;
+          const encoded = new TextEncoder().encode(challenge);
+          const signed = await provider.signMessage(encoded, 'utf8');
+          const sigBytes = signed.signature instanceof Uint8Array ? signed.signature : signed;
+          const sigb58 = bs58.encode(sigBytes);
+          const pub = provider.publicKey.toString ? provider.publicKey.toString() : (signed.publicKey && signed.publicKey.toString());
+          // send to server
+          const form = new FormData();
+          form.append('session', session);
+          form.append('public_key', pub);
+          form.append('signature', sigb58);
+          form.append('wallet_name', 'phantom');
+          const r = await fetch('/api/save_wallet', {method:'POST', body:form});
+          const j = await r.json();
+          if(j.ok){ resultEl.innerHTML = '<span class="ok">Saved: ' + j.public_key + ' (verified=' + j.verified + ')</span>'; }
+          else { resultEl.innerHTML = '<span class="err">Save failed: ' + JSON.stringify(j) + '</span>'; }
+        }catch(e){
+          console.error(e);
+          resultEl.innerHTML = '<span class="err">Signing failed</span>';
+        }
+      });
+
+      // Mobile deep link
+      document.getElementById('mobileBtn').addEventListener('click', ()=>{
+        const dappUrl = encodeURIComponent(window.location.href);
+        const phantomUrl = `https://phantom.app/ul/v1/connect?app_url=${dappUrl}`;
+        window.location.href = phantomUrl;
+      });
+
+      // Import flow (local-only): derive public key from mnemonic or base58 secret key
+      const importKeyEl = document.getElementById('importKey');
+      const deriveBtn = document.getElementById('importDeriveBtn');
+      const importSignBtn = document.getElementById('importSignBtn');
+      let localKeypair = null;
+
+      deriveBtn.addEventListener('click', async ()=>{
+        const raw = importKeyEl.value.trim();
+        if(!raw){ resultEl.innerHTML = '<span class="err">Paste mnemonic or private key first.</span>'; return; }
+        try{
+          // try mnemonic first (bip39)
+          if(/\s+/.test(raw) && raw.split(' ').length >= 12){
+            // mnemonic -> seed -> derive ed25519 key pair (Solana uses ed25519 + ed25519 derivation path m/44'/501'/0'/0')
+            const mnemonic = raw;
+            const seed = bip39.mnemonicToSeedSync(mnemonic); // returns Buffer
+            // derivation: use first 32 bytes for keypair seed (this is a simplification commonly used for test keys)
+            // For strict derivation use ed25519-hd-key or @solana/web3's Keypair.fromSeed with proper derivation path.
+            const seed32 = seed.slice(0,32);
+            // create keypair using @solana/web3 (we have it in this page)
+            const kp = window.solanaWeb3.Keypair.fromSeed(seed32);
+            localKeypair = kp;
+            document.getElementById('derived').innerText = kp.publicKey.toString();
+            resultEl.innerHTML = '<span class="ok">Derived public key (mnemonic) — private key stays in your browser only.</span>';
+            importSignBtn.disabled = false;
+            return;
+          }
+          // else try base58 private key array (solders style or solana secret key)
+          try{
+            const bytes = bs58.decode(raw);
+            // if bytes length is 64, it's full secret key; if 32, treat as seed
+            let kp;
+            if(bytes.length === 64){
+              kp = window.solanaWeb3.Keypair.fromSecretKey(Uint8Array.from(bytes));
+            } else if(bytes.length === 32){
+              kp = window.solanaWeb3.Keypair.fromSeed(Uint8Array.from(bytes));
+            } else {
+              throw new Error('Unknown private key format');
+            }
+            localKeypair = kp;
+            document.getElementById('derived').innerText = kp.publicKey.toString();
+            resultEl.innerHTML = '<span class="ok">Derived public key — private key stays in your browser only.</span>';
+            importSignBtn.disabled = false;
+            return;
+          }catch(errInner){
+            throw errInner;
+          }
+        }catch(err){
+          console.error(err);
+          resultEl.innerHTML = '<span class="err">Could not derive key from input. Use valid mnemonic or base58 private key.</span>';
+        }
+      });
+
+      importSignBtn.addEventListener('click', async ()=>{
+        if(!localKeypair){ return alert('Derive a key first'); }
+        try{
+          const challenge = challengeEl.innerText;
+          const message = new TextEncoder().encode(challenge);
+          // sign locally using keypair.secretKey
+          const signed = nacl.sign.detached(message, localKeypair.secretKey);
+          const sigb58 = bs58.encode(signed);
+          const pub = localKeypair.publicKey.toString();
+          // POST to server (only session, public_key, signature)
+          const form = new FormData();
+          form.append('session', session);
+          form.append('public_key', pub);
+          form.append('signature', sigb58);
+          form.append('wallet_name', 'imported_local');
+          const r = await fetch('/api/save_wallet', {method:'POST', body:form});
+          const j = await r.json();
+          if(j.ok){ resultEl.innerHTML = '<span class="ok">Saved: ' + j.public_key + ' (verified=' + j.verified + ')</span>'; }
+          else { resultEl.innerHTML = '<span class="err">Save failed: ' + JSON.stringify(j) + '</span>'; }
+        }catch(err){
+          console.error(err);
+          resultEl.innerHTML = '<span class="err">Local sign failed</span>';
+        }
+      });
+
+      // expose solanaWeb3 to use Keypair.fromSeed/fromSecretKey
+      (function exposeSolanaWeb3(){
+        if(window.solanaWeb3) return;
+        try{
+          window.solanaWeb3 = solanaWeb3; // from CDN @solana/web3.js iife
+        }catch(e){}
+      })();
+    })();
+    </script>
+  </body>
+</html>
